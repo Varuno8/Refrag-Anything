@@ -50,8 +50,8 @@ class RefragRuntime:
         self.decoder_adapter = decoder_adapter or DecoderAdapter()
 
     # ------------------------------------------------------------------
-    def build_plan(self, query: str, retrieval_data: dict[str, Any]) -> ContextPlan:
-        return self.context_planner.build_plan(query, retrieval_data)
+    async def build_plan(self, query: str, retrieval_data: dict[str, Any]) -> ContextPlan:
+        return await self.context_planner.build_plan(query, retrieval_data)
 
     async def generate(
         self,

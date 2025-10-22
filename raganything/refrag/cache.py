@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Generic, TypeVar
+from typing import Any, Awaitable, Callable, Dict, Generic, TypeVar, cast
 
 T = TypeVar("T")
 
@@ -24,9 +25,9 @@ class RefragCache(Generic[T]):
         self.config = config
         self._values: Dict[Any, tuple[float, T]] = {}
 
-    def get_or_set(self, key: Any, factory: Callable[[], T]) -> T:
+    async def get_or_set(self, key: Any, factory: Callable[[], T | Awaitable[T]]) -> T:
         if not self.config.store_embeddings:
-            return factory()
+            return await _maybe_await(factory())
 
         now = time.time()
         entry = self._values.get(key)
@@ -35,7 +36,7 @@ class RefragCache(Generic[T]):
             if expires_at > now:
                 return value
 
-        value = factory()
+        value = await _maybe_await(factory())
         expires_at = now + max(1, self.config.ttl_seconds)
         self._values[key] = (expires_at, value)
         return value
@@ -48,6 +49,13 @@ class RefragCache(Generic[T]):
         expired = [key for key, (expires_at, _) in self._values.items() if expires_at <= now]
         for key in expired:
             self._values.pop(key, None)
+
+
+async def _maybe_await(value: T | Awaitable[T]) -> T:
+    if inspect.isawaitable(value):
+        awaited = await cast(Awaitable[T], value)
+        return awaited
+    return cast(T, value)
 
 
 __all__ = ["CacheConfig", "RefragCache"]

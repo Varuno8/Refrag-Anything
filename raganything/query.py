@@ -175,7 +175,7 @@ class QueryMixin:
 
         retrieval_param = QueryParam(mode=mode, **kwargs)
         retrieval_data = await self.lightrag.aquery_data(query, param=retrieval_param)
-        plan = runtime.build_plan(query, retrieval_data)
+        plan = await runtime.build_plan(query, retrieval_data)
 
         fallback_param = QueryParam(mode=mode, **kwargs)
 

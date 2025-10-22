@@ -61,7 +61,7 @@ class ContextPlanner:
         self.cache = cache
 
     # ------------------------------------------------------------------
-    def build_plan(self, query: str, retrieval_data: Dict[str, Any]) -> ContextPlan:
+    async def build_plan(self, query: str, retrieval_data: Dict[str, Any]) -> ContextPlan:
         nodes = list(self._extract_nodes(retrieval_data))
         embeddings: List[np.ndarray] = []
         projected: List[np.ndarray] = []
@@ -71,13 +71,15 @@ class ContextPlanner:
         for node in nodes:
             node_id = self._node_id(node)
             if node_id is not None:
-                embedding = self.cache.get_or_set(node_id, lambda: self.encoder.encode(node))
+                embedding = await self.cache.get_or_set(
+                    node_id, lambda: self.encoder.encode(node)
+                )
                 projection_key = f"phi::{node_id}"
-                projected_vec = self.cache.get_or_set(
+                projected_vec = await self.cache.get_or_set(
                     projection_key, lambda: self.projector.project(embedding)
                 )
             else:
-                embedding = self.encoder.encode(node)
+                embedding = await self.encoder.encode(node)
                 projected_vec = self.projector.project(embedding)
 
             embeddings.append(embedding)

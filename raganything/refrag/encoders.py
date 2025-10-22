@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import inspect
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -16,10 +17,10 @@ LOGGER = logging.getLogger(__name__)
 class EncoderResources:
     """Container for optional encoder callables."""
 
-    text_encoder: Optional[Callable[[str], np.ndarray]] = None
-    image_encoder: Optional[Callable[[Dict[str, Any]], np.ndarray]] = None
-    table_encoder: Optional[Callable[[Dict[str, Any]], np.ndarray]] = None
-    equation_encoder: Optional[Callable[[Dict[str, Any]], np.ndarray]] = None
+    text_encoder: Optional[Callable[[str], Any]] = None
+    image_encoder: Optional[Callable[[Dict[str, Any]], Any]] = None
+    table_encoder: Optional[Callable[[Dict[str, Any]], Any]] = None
+    equation_encoder: Optional[Callable[[Dict[str, Any]], Any]] = None
 
 
 class ChunkEncoder:
@@ -47,18 +48,18 @@ class ChunkEncoder:
     # ------------------------------------------------------------------
     # public API
     # ------------------------------------------------------------------
-    def encode(self, node: Dict[str, Any]) -> np.ndarray:
+    async def encode(self, node: Dict[str, Any]) -> np.ndarray:
         """Encode a chunk node into a dense embedding."""
 
         modality = self._detect_modality(node)
         if modality == "image":
-            vector = self._encode_image(node)
+            vector = await self._encode_image(node)
         elif modality == "table":
-            vector = self._encode_table(node)
+            vector = await self._encode_table(node)
         elif modality == "equation":
-            vector = self._encode_equation(node)
+            vector = await self._encode_equation(node)
         else:
-            vector = self._encode_text(node)
+            vector = await self._encode_text(node)
 
         if self.normalize:
             norm = float(np.linalg.norm(vector))
@@ -69,21 +70,21 @@ class ChunkEncoder:
     # ------------------------------------------------------------------
     # modality helpers
     # ------------------------------------------------------------------
-    def _encode_text(self, node: Dict[str, Any]) -> np.ndarray:
+    async def _encode_text(self, node: Dict[str, Any]) -> np.ndarray:
         text = self._extract_text(node)
         if not text:
             return self._hash_embedding("EMPTY_TEXT")
 
         if self.resources.text_encoder is not None:
             try:
-                encoding = self.resources.text_encoder(text)
+                encoding = await _maybe_await(self.resources.text_encoder(text))
                 return self._coerce_vector(encoding)
             except Exception:  # pragma: no cover - defensive logging
                 LOGGER.exception("Text encoder failed; falling back to hashing encoder")
 
         if self.embedding_func is not None:
             try:
-                embedding = self.embedding_func(text)
+                embedding = await _maybe_await(self.embedding_func(text))
                 return self._coerce_vector(embedding)
             except Exception:  # pragma: no cover - defensive logging
                 LOGGER.exception(
@@ -92,30 +93,36 @@ class ChunkEncoder:
 
         return self._hash_embedding(text)
 
-    def _encode_image(self, node: Dict[str, Any]) -> np.ndarray:
+    async def _encode_image(self, node: Dict[str, Any]) -> np.ndarray:
         if self.resources.image_encoder is not None:
             try:
-                return self._coerce_vector(self.resources.image_encoder(node))
+                return self._coerce_vector(
+                    await _maybe_await(self.resources.image_encoder(node))
+                )
             except Exception:  # pragma: no cover - defensive logging
                 LOGGER.exception("Image encoder failed; falling back to hashing encoder")
 
         source = self._extract_image_source(node)
         return self._hash_embedding(source or "UNKNOWN_IMAGE")
 
-    def _encode_table(self, node: Dict[str, Any]) -> np.ndarray:
+    async def _encode_table(self, node: Dict[str, Any]) -> np.ndarray:
         if self.resources.table_encoder is not None:
             try:
-                return self._coerce_vector(self.resources.table_encoder(node))
+                return self._coerce_vector(
+                    await _maybe_await(self.resources.table_encoder(node))
+                )
             except Exception:  # pragma: no cover - defensive logging
                 LOGGER.exception("Table encoder failed; falling back to hashing encoder")
 
         text = self._extract_table_text(node)
         return self._hash_embedding(text or "EMPTY_TABLE")
 
-    def _encode_equation(self, node: Dict[str, Any]) -> np.ndarray:
+    async def _encode_equation(self, node: Dict[str, Any]) -> np.ndarray:
         if self.resources.equation_encoder is not None:
             try:
-                return self._coerce_vector(self.resources.equation_encoder(node))
+                return self._coerce_vector(
+                    await _maybe_await(self.resources.equation_encoder(node))
+                )
             except Exception:  # pragma: no cover - defensive logging
                 LOGGER.exception(
                     "Equation encoder failed; falling back to hashing encoder"
@@ -228,6 +235,12 @@ class ChunkEncoder:
         if isinstance(node, dict):
             return node.get(key)
         return getattr(node, key, None)
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 __all__ = ["ChunkEncoder", "EncoderResources"]
