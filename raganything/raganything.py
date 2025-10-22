@@ -29,6 +29,9 @@ from lightrag.utils import logger
 
 # Import configuration and modules
 from raganything.config import RAGAnythingConfig
+from raganything.refrag.cache import CacheConfig
+from raganything.refrag.runtime import RefragRuntime
+from raganything.refrag.selective_expand import SelectiveExpansionPolicy
 from raganything.query import QueryMixin
 from raganything.processor import ProcessorMixin
 from raganything.batch import BatchMixin
@@ -96,6 +99,9 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
     _parser_installation_checked: bool = field(default=False, init=False)
     """Flag to track if parser installation has been checked."""
 
+    _refrag_runtime: Optional[RefragRuntime] = field(default=None, init=False)
+    """Lazy-initialised REFRAG runtime."""
+
     def __post_init__(self):
         """Post-initialization setup following LightRAG pattern"""
         # Initialize configuration if not provided
@@ -120,6 +126,9 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
         if not os.path.exists(self.working_dir):
             os.makedirs(self.working_dir)
             self.logger.info(f"Created working directory: {self.working_dir}")
+
+        # Reset REFRAG runtime; it will be lazily created once LightRAG is ready.
+        self._refrag_runtime = None
 
         # Log configuration info
         self.logger.info("RAGAnything initialized with config:")
@@ -212,6 +221,38 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
             context_extractor=self.context_extractor,
         )
 
+    def _get_refrag_runtime(self) -> Optional[RefragRuntime]:
+        """Lazily construct the REFRAG runtime if enabled."""
+
+        cfg = getattr(self.config, "refrag", None)
+        if not cfg or not cfg.enabled:
+            return None
+        if self.lightrag is None:
+            return None
+        if self._refrag_runtime is None:
+            policy_cfg = cfg.selective_expand
+            policy = SelectiveExpansionPolicy(
+                expand_numeric_tables=policy_cfg.expand_numeric_tables,
+                expand_legal_citations=policy_cfg.expand_legal_citations,
+                entropy_tau=policy_cfg.entropy_tau,
+                mode=policy_cfg.mode,
+            )
+            cache_cfg = cfg.cache
+            cache_config = CacheConfig(
+                ttl_seconds=cache_cfg.ttl_seconds,
+                store_embeddings=cache_cfg.store_embeddings,
+            )
+            self._refrag_runtime = RefragRuntime(
+                tokenizer=self.lightrag.tokenizer,
+                encoder_dim=cfg.encoder_dim,
+                decoder_dim=cfg.decoder_dim,
+                projector_hidden=cfg.projector_hidden,
+                expansion_policy=policy,
+                cache_config=cache_config,
+                embedding_func=self.embedding_func,
+            )
+        return self._refrag_runtime
+
         self.logger.info("Multimodal processors initialized with context support")
         self.logger.info(f"Available processors: {list(self.modal_processors.keys())}")
         self.logger.info(f"Context configuration: {self._create_context_config()}")
@@ -278,6 +319,9 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
                     if not self.modal_processors:
                         self._initialize_processors()
 
+                    # Refresh REFRAG runtime now that LightRAG is ready.
+                    self._refrag_runtime = None
+
                     return {"success": True}
 
                 except Exception as e:
@@ -336,6 +380,9 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
 
                 # Initialize processors after LightRAG is ready
                 self._initialize_processors()
+
+                # Reset REFRAG runtime so it can be recreated with the new LightRAG instance.
+                self._refrag_runtime = None
 
                 self.logger.info(
                     "LightRAG, parse cache, and multimodal processors initialized"

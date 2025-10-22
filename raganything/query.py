@@ -4,6 +4,7 @@ Query functionality for RAGAnything
 Contains all query-related methods for both text and multimodal queries
 """
 
+import inspect
 import json
 import hashlib
 import re
@@ -112,6 +113,10 @@ class QueryMixin:
         Returns:
             str: Query result
         """
+        init_status = await self._ensure_lightrag_initialized()
+        if isinstance(init_status, dict) and not init_status.get("success", True):
+            error_msg = init_status.get("error") or "Failed to initialize LightRAG"
+            raise RuntimeError(error_msg)
         if self.lightrag is None:
             raise ValueError(
                 "No LightRAG instance available. Please process documents first or provide a pre-initialized LightRAG instance."
@@ -141,6 +146,10 @@ class QueryMixin:
                 "VLM enhanced query requested but vision_model_func is not available, falling back to normal query"
             )
 
+        # Route through REFRAG runtime when enabled.
+        if getattr(self.config, "refrag", None) and self.config.refrag.enabled:
+            return await self._aquery_refrag(query, mode=mode, **kwargs)
+
         # Create query parameters
         query_param = QueryParam(mode=mode, **kwargs)
 
@@ -152,6 +161,49 @@ class QueryMixin:
 
         self.logger.info("Text query completed")
         return result
+
+    async def _aquery_refrag(self, query: str, mode: str = "mix", **kwargs) -> str:
+        """Execute a query using the REFRAG compression pipeline."""
+
+        runtime = self._get_refrag_runtime()
+        if runtime is None:
+            self.logger.warning(
+                "REFRAG was requested but the runtime could not be initialised; falling back to LightRAG"
+            )
+            query_param = QueryParam(mode=mode, **kwargs)
+            return await self.lightrag.aquery(query, param=query_param)
+
+        retrieval_param = QueryParam(mode=mode, **kwargs)
+        retrieval_data = await self.lightrag.aquery_data(query, param=retrieval_param)
+        plan = await runtime.build_plan(query, retrieval_data)
+
+        fallback_param = QueryParam(mode=mode, **kwargs)
+
+        async def fallback_call() -> str:
+            return await self.lightrag.aquery(query, param=fallback_param)
+
+        if self.llm_model_func is None:
+            self.logger.warning(
+                "llm_model_func unavailable; using LightRAG's default generation pipeline"
+            )
+            return await fallback_call()
+
+        async def llm_callable(prompt: str) -> str:
+            result = self.llm_model_func(prompt)
+            if inspect.isawaitable(result):
+                result = await result
+            if not isinstance(result, str):
+                raise TypeError(
+                    "llm_model_func must return a string when invoked via REFRAG runtime"
+                )
+            return result
+
+        return await runtime.generate(
+            plan,
+            query=query,
+            llm_callable=llm_callable,
+            fallback_callable=fallback_call,
+        )
 
     async def aquery_with_multimodal(
         self,
