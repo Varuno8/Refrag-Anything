@@ -14,9 +14,11 @@ Run with ``python examples/refrag_ui_app.py`` and open the reported URL.
 from __future__ import annotations
 
 import asyncio
+import os
+import platform
 from dataclasses import replace
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import gradio as gr
 from dotenv import load_dotenv
@@ -51,6 +53,23 @@ def _ensure_event_loop_result(awaitable):
             pass
         asyncio.set_event_loop(None)
         loop.close()
+
+
+def _env_api_config():
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    base_url = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
+    return api_key, base_url
+
+
+def _force_cpu_device() -> str:
+    """
+    Return 'cpu' on macOS (Darwin) or when FORCE_CPU=1 in env; otherwise empty string.
+    This is passed through to MinerU to disable MPS use that triggers NotImplementedError.
+    """
+
+    if os.getenv("FORCE_CPU", "0") == "1":
+        return "cpu"
+    return "cpu" if platform.system() == "Darwin" else ""
 
 
 def _build_llm_functions(
@@ -178,8 +197,6 @@ def _initial_config(
 
 def initialize_pipeline(
     existing_rag: Optional[RAGAnything],
-    api_key: str,
-    base_url: str,
     working_dir: str,
     parser: str,
     parse_method: str,
@@ -194,9 +211,11 @@ def initialize_pipeline(
 ) -> Tuple[str, Optional[RAGAnything], List[dict]]:
     """Create or refresh the RAGAnything pipeline."""
 
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    api_key, base_url = _env_api_config()
     if not api_key:
         return (
-            "❌ Please provide an API key before initializing the pipeline.",
+            "❌ No OPENAI_API_KEY found in environment (.env). Please set it and reload the app.",
             existing_rag,
             [],
         )
@@ -214,7 +233,7 @@ def initialize_pipeline(
 
     llm_model_func, vision_model_func, embedding_func = _build_llm_functions(
         api_key=api_key,
-        base_url=base_url or None,
+        base_url=base_url,
         llm_model=llm_model,
         vision_model=vision_model or llm_model,
         embedding_model=embedding_model,
@@ -232,6 +251,12 @@ def initialize_pipeline(
         expand_legal=expand_legal,
     )
 
+    try:
+        config.parser = parser
+        setattr(config, "mineru_device", _force_cpu_device())
+    except Exception:
+        pass
+
     rag = RAGAnything(
         config=config,
         llm_model_func=llm_model_func,
@@ -246,40 +271,42 @@ def initialize_pipeline(
     )
 
 
-def _format_doc_table(documents: Iterable[Tuple[str, str]]) -> List[dict]:
-    return [
-        {"File": name, "Status": status}
-        for name, status in documents
-    ]
+def _format_doc_table(documents: Iterable[Dict[str, str]]) -> List[dict]:
+    return list(documents)
 
 
 def process_documents(
     rag: Optional[RAGAnything],
-    existing_docs: List[Tuple[str, str]],
+    existing_docs: List[Dict[str, str]],
     files: List[str],
     parse_method: str,
-) -> Tuple[str, List[Tuple[str, str]]]:
+) -> Tuple[str, List[Dict[str, str]]]:
     if rag is None:
         return "❌ Initialize the pipeline before uploading files.", existing_docs
 
     if not files:
         return "⚠️ No files selected for ingestion.", existing_docs
 
-    new_docs: List[Tuple[str, str]] = []
+    new_docs: List[Dict[str, str]] = []
+    device = _force_cpu_device()
+    kwargs: Dict[str, str] = {}
+    if device:
+        kwargs["device"] = device
     for file_path in files:
         try:
             _ensure_event_loop_result(
                 rag.process_document_complete(
                     file_path,
                     parse_method=parse_method or rag.config.parse_method,
+                    **kwargs,
                 )
             )
-            new_docs.append((Path(file_path).name, "Processed"))
+            new_docs.append({"File": Path(file_path).name, "Status": "Processed"})
         except Exception as exc:  # pragma: no cover - UI level reporting
-            new_docs.append((Path(file_path).name, f"Error: {exc}"))
+            new_docs.append({"File": Path(file_path).name, "Status": f"Error: {exc}"})
 
     combined = existing_docs + new_docs
-    status_lines = [f"• {name}: {status}" for name, status in new_docs]
+    status_lines = [f"• {doc['File']}: {doc['Status']}" for doc in new_docs]
     status = (
         "✅ Ingestion complete:\n" + "\n".join(status_lines)
         if status_lines
@@ -291,19 +318,23 @@ def process_documents(
 
 def answer_query(
     rag: Optional[RAGAnything],
-    history: List[Tuple[str, str]],
+    history: List[Dict[str, str]],
     question: str,
     mode: str,
-) -> Tuple[List[Tuple[str, str]], str, List[Tuple[str, str]]]:
+) -> Tuple[List[Dict[str, str]], str, List[Dict[str, str]]]:
     raw_question = question or ""
     question = raw_question.strip()
 
     if rag is None:
         if question:
-            updated_history = history + [
-                (question, "Pipeline not initialized. Please configure and initialize first."),
+            updated = history + [
+                {"role": "user", "content": question},
+                {
+                    "role": "assistant",
+                    "content": "Pipeline not initialized. Please configure and initialize first.",
+                },
             ]
-            return updated_history, "", updated_history
+            return updated, "", updated
         return history, raw_question, history
 
     if not question:
@@ -314,39 +345,58 @@ def answer_query(
     except Exception as exc:  # pragma: no cover - UI level reporting
         answer = f"Error: {exc}"
 
-    updated_history = history + [(question, answer)]
+    updated_history = history + [
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": str(answer)},
+    ]
     return updated_history, "", updated_history
 
 
-def clear_conversation() -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+def clear_conversation() -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
     return [], []
 
 
 def build_interface() -> gr.Blocks:
     with gr.Blocks(
         title="REFRAG Anything Studio",
-        theme=gr.themes.Soft(primary_hue="violet", secondary_hue="cyan"),
+        theme=gr.themes.Soft(
+            primary_hue="cyan",
+            secondary_hue="violet",
+            neutral_hue="slate",
+        ),
+        css="""
+    .gradio-container { max-width: 1080px !important; margin: auto; }
+    .hero-card {
+        background: radial-gradient(1200px 400px at 10% 0%, rgba(0,217,255,0.06), transparent),
+                    linear-gradient(180deg, rgba(0,0,0,0.35), rgba(0,0,0,0.15));
+        border: 1px solid rgba(0, 217, 255, 0.25);
+        border-radius: 16px; padding: 18px 20px;
+        backdrop-filter: blur(6px);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+    }
+    .section-title {
+        font-weight: 700; letter-spacing: .3px;
+        border-left: 4px solid #00d9ff; padding-left: 10px; margin: 6px 0 12px;
+    }
+    .wrap-table table { white-space: normal !important; }
+    button { border-radius: 10px !important; }
+    """
     ) as demo:
-        gr.Markdown(
+        gr.HTML(
             """
-            # REFRAG Anything Studio
-
-            Upload documents, index them with the multimodal dual-graph retriever, and
-            query them using the REFRAG compressed decoding pipeline.
-            """
+<div class="hero-card">
+  <h1 style="margin:0 0 6px 0;">REFRAG Anything Studio</h1>
+  <div style="opacity:.85">
+    <b>Multimodal dual-graph RAG</b> with <b>REFRAG compressed decoding</b>.
+    <br/>Credentials are read automatically from <code>.env</code>.
+  </div>
+</div>
+"""
         )
 
         with gr.Row():
             with gr.Column(scale=2):
-                api_key = gr.Textbox(
-                    label="OpenAI API Key",
-                    type="password",
-                    placeholder="sk-...",
-                )
-                base_url = gr.Textbox(
-                    label="Custom Base URL",
-                    placeholder="https://api.openai.com/v1",
-                )
+                gr.Markdown('<div class="section-title">Storage & Parsing</div>')
                 working_dir = gr.Textbox(
                     label="Working Directory",
                     value="./rag_storage_ui",
@@ -364,50 +414,56 @@ def build_interface() -> gr.Blocks:
                         label="Parse Method",
                     )
 
-                with gr.Accordion("Model & REFRAG Settings", open=False):
-                    llm_model = gr.Textbox(
-                        label="LLM Model",
-                        value="gpt-4o-mini",
-                    )
-                    vision_model = gr.Textbox(
-                        label="Vision Model",
-                        value="gpt-4o",
-                    )
-                    embedding_model = gr.Textbox(
-                        label="Embedding Model",
-                        value="text-embedding-3-large",
-                    )
-                    refrag_enabled = gr.Checkbox(
-                        label="Enable REFRAG Compression",
-                        value=True,
-                    )
-                    compression_k = gr.Slider(
-                        label="Compression Rate (k)",
-                        value=16,
-                        minimum=4,
-                        maximum=64,
-                        step=4,
-                    )
-                    entropy_tau = gr.Slider(
-                        label="Entropy Threshold (τ)",
-                        value=2.0,
-                        minimum=0.5,
-                        maximum=5.0,
-                        step=0.1,
-                    )
-                    expand_numeric = gr.Checkbox(
-                        label="Auto-expand numeric & table-heavy chunks",
-                        value=True,
-                    )
-                    expand_legal = gr.Checkbox(
-                        label="Auto-expand legal & citation chunks",
-                        value=True,
-                    )
+                gr.Markdown('<div class="section-title">Models & REFRAG</div>')
+                llm_model = gr.Textbox(
+                    label="LLM Model",
+                    value="gpt-4o-mini",
+                )
+                vision_model = gr.Textbox(
+                    label="Vision Model",
+                    value="gpt-4o",
+                )
+                embedding_model = gr.Textbox(
+                    label="Embedding Model",
+                    value="text-embedding-3-large",
+                )
+                refrag_enabled = gr.Checkbox(
+                    label="Enable REFRAG Compression",
+                    value=True,
+                )
+                compression_k = gr.Slider(
+                    label="Compression Rate (k)",
+                    value=16,
+                    minimum=4,
+                    maximum=64,
+                    step=4,
+                )
+                entropy_tau = gr.Slider(
+                    label="Entropy Threshold (τ)",
+                    value=2.0,
+                    minimum=0.5,
+                    maximum=5.0,
+                    step=0.1,
+                )
+                expand_numeric = gr.Checkbox(
+                    label="Auto-expand numeric & table-heavy chunks",
+                    value=True,
+                )
+                expand_legal = gr.Checkbox(
+                    label="Auto-expand legal & citation chunks",
+                    value=True,
+                )
 
-                init_button = gr.Button("Initialize Pipeline", variant="primary")
+                init_button = gr.Button(
+                    "Initialize Pipeline",
+                    variant="primary",
+                    icon="🚀",
+                )
             with gr.Column(scale=1):
+                env_ok = "✅ .env loaded" if os.getenv("OPENAI_API_KEY") else "⚠️ .env missing OPENAI_API_KEY"
+                gr.Markdown(f"**Env Status:** {env_ok}")
                 status = gr.Markdown(
-                    "Use the controls to configure your pipeline, then initialize.",
+                    "Configure settings and click **Initialize Pipeline**. API credentials are read from your environment (.env).",
                 )
                 doc_table = gr.Dataframe(
                     headers=["File", "Status"],
@@ -415,6 +471,7 @@ def build_interface() -> gr.Blocks:
                     label="Ingested Documents",
                     wrap=True,
                     interactive=False,
+                    elem_classes=["wrap-table"],
                 )
 
         pipeline_state = gr.State(None)
@@ -425,8 +482,6 @@ def build_interface() -> gr.Blocks:
             initialize_pipeline,
             inputs=[
                 pipeline_state,
-                api_key,
-                base_url,
                 working_dir,
                 parser,
                 parse_method,
@@ -467,7 +522,7 @@ def build_interface() -> gr.Blocks:
             )
 
         with gr.Tab("Chat"):
-            chatbox = gr.Chatbot(label="Conversation")
+            chatbox = gr.Chatbot(label="Conversation", type="messages")
             question = gr.Textbox(
                 label="Ask a question",
                 placeholder="What would you like to know about your documents?",
@@ -501,6 +556,7 @@ def build_interface() -> gr.Blocks:
 
 
 def main():
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     demo = build_interface()
     demo.launch()
 
