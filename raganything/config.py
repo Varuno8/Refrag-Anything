@@ -3,10 +3,76 @@ Configuration classes for RAGAnything
 
 Contains configuration dataclasses with environment variable support
 """
+"""Configuration dataclasses for RAGAnything and the REFRAG runtime."""
 
 from dataclasses import dataclass, field
 from typing import List
 from lightrag.utils import get_env_value
+
+
+@dataclass
+class RefragTrainingConfig:
+    """Configuration controlling REFRAG CPT and alignment utilities."""
+
+    cpt_enabled: bool = field(default=get_env_value("REFRAG_TRAINING_CPT_ENABLED", False, bool))
+    reconstruction_curriculum: bool = field(
+        default=get_env_value("REFRAG_TRAINING_RECONSTRUCTION", True, bool)
+    )
+    next_paragraph_prediction: bool = field(
+        default=get_env_value("REFRAG_TRAINING_NEXT_PARAGRAPH", True, bool)
+    )
+
+
+@dataclass
+class RefragCacheConfig:
+    """Runtime cache configuration for REFRAG."""
+
+    ttl_seconds: int = field(default=get_env_value("REFRAG_CACHE_TTL_SECONDS", 3600, int))
+    store_embeddings: bool = field(
+        default=get_env_value("REFRAG_CACHE_STORE_EMBEDDINGS", True, bool)
+    )
+    preload_on_ingest: bool = field(
+        default=get_env_value("REFRAG_CACHE_PRELOAD_ON_INGEST", True, bool)
+    )
+
+
+@dataclass
+class RefragSelectiveExpandConfig:
+    """Selective expansion heuristic configuration."""
+
+    mode: str = field(default=get_env_value("REFRAG_SELECTIVE_MODE", "heuristic", str))
+    entropy_tau: float = field(
+        default=get_env_value("REFRAG_SELECTIVE_ENTROPY_TAU", 2.0, float)
+    )
+    expand_numeric_tables: bool = field(
+        default=get_env_value("REFRAG_SELECTIVE_EXPAND_NUMERIC", True, bool)
+    )
+    expand_legal_citations: bool = field(
+        default=get_env_value("REFRAG_SELECTIVE_EXPAND_LEGAL", True, bool)
+    )
+
+
+@dataclass
+class RefragConfig:
+    """Top-level configuration for the REFRAG runtime."""
+
+    enabled: bool = field(default=get_env_value("REFRAG_ENABLED", False, bool))
+    encoder: str = field(default=get_env_value("REFRAG_ENCODER", "roberta-large", str))
+    encoder_dim: int = field(default=get_env_value("REFRAG_ENCODER_DIM", 1024, int))
+    projector_hidden: int = field(
+        default=get_env_value("REFRAG_PROJECTOR_HIDDEN", 4096, int)
+    )
+    decoder_dim: int = field(
+        default=get_env_value("REFRAG_DECODER_DIM", 4096, int)
+    )
+    compression_rate_k: int = field(
+        default=get_env_value("REFRAG_COMPRESSION_RATE_K", 16, int)
+    )
+    selective_expand: RefragSelectiveExpandConfig = field(
+        default_factory=RefragSelectiveExpandConfig
+    )
+    cache: RefragCacheConfig = field(default_factory=RefragCacheConfig)
+    training: RefragTrainingConfig = field(default_factory=RefragTrainingConfig)
 
 
 @dataclass
@@ -102,6 +168,8 @@ class RAGAnythingConfig:
 
     content_format: str = field(default=get_env_value("CONTENT_FORMAT", "minerU", str))
     """Default content format for context extraction when processing documents."""
+
+    refrag: "RefragConfig" = field(default_factory=lambda: RefragConfig())
 
     def __post_init__(self):
         """Post-initialization setup for backward compatibility"""
